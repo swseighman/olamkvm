@@ -1,0 +1,114 @@
+---
+- name: create vm with community.libvirt collection
+  hosts: kvm
+  collections:
+    - community.libvirt
+    - community.crypto
+  become: yes
+
+  vars_files:
+    - vars/defaults.yml
+
+  tasks:
+
+  - name: get list of existing VMs
+    community.libvirt.virt:
+      command: list_vms
+    register: existing_vms
+    changed_when: no
+
+  - name: print list of existing VMs
+    debug:
+      var: existing_vms
+
+  - name: create VM when not exist
+    block:
+
+    - name: download base image
+      get_url:
+        url: ""
+        dest: "/tmp/"
+        checksum: "sha256:"
+
+    - name: copy base image to libvirt directory
+      ansible.builtin.copy:
+        dest: "/.qcow"
+        src: "/tmp/"
+        force: no
+        remote_src: yes 
+        owner: qemu
+        group: qemu
+        mode: 0660
+      register: copy_results
+
+    - name: generate a vm ssh keypair
+      community.crypto.openssh_keypair:
+        path: ~/.ssh/id_rsa
+        size: 2048
+        comment: vm ssh keypair
+      register: vm_ssh_keypair
+      become_user: ""
+
+    - name: create vm meta-data
+      ansible.builtin.template:
+        src: templates/meta-data.j2
+        dest: "~/meta-data"
+      become_user: ""
+
+    - name: read the vm ssh private key
+      slurp:
+        src: "~/.ssh/id_rsa.pub"
+      register: vm_ssh_private_key
+      become_user: ""
+
+    - name: create var for private key
+      ansible.builtin.set_fact:
+        vm_private_key: ""
+
+    - name: create vm user-data
+      ansible.builtin.template:
+        src: templates/user-data.j2
+        dest: ~/user-data
+      become_user: ""
+
+    - name: generate iso containing cloud-init configuration
+      shell: |
+        genisoimage -output /tmp/.iso -volid cidata -joliet -rock ~/user-data ~/meta-data
+      become_user: ""
+
+    - name: copy vm iso image to libvirt directory
+      ansible.builtin.copy:
+        dest: "/.iso"
+        src: "/tmp/.iso"
+        force: no
+        remote_src: yes 
+        owner: qemu
+        group: qemu
+        mode: 0660
+
+    - name: remove vm iso image from tmp
+      ansible.builtin.file:
+        path: "/tmp/.iso"
+        state: absent
+
+    - name: define the vm
+      community.libvirt.virt:
+        command: define
+        xml: ""
+
+    when: ( vm_name not in existing_vms.list_vms )
+
+  - name: start the vm
+    community.libvirt.virt:
+      name: ""
+      state: running
+    register: vm_start_results
+    until: "vm_start_results is success"
+    retries: 15
+    delay: 2
+
+  - name: remove the temporary file
+    file:
+      path: "/tmp/"
+      state: absent
+    when: cleanup_tmp | bool
